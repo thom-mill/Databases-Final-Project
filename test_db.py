@@ -89,6 +89,20 @@ section("2c. get_filtered_customers — LIKE name pattern")
 res = db.get_filtered_customers(Customer(name="%on%"), use_patterns=True)
 check("LIKE name pattern returns results", len(res) > 0)
 
+section("2d. get_filtered_customers — filter by email")
+res = db.get_filtered_customers(Customer(email=real_cust.email))
+check("filter by email returns result", len(res) >= 1)
+
+section("2e. get_filtered_customers — no match returns empty list")
+res = db.get_filtered_customers(Customer(customer_id="ZZZNOMATCH00000Z"))
+check("no match returns empty list", res == [])
+
+section("2f. get_filtered_customers — address format correct")
+c = db.get_filtered_customers(Customer(customer_id=real_cust.customer_id))[0]
+parts = c.address.split(", ")
+check("address has 3 comma-separated parts", len(parts) == 3)
+check("address state+zip in last part", len(parts[2].strip()) > 0)
+
 # ─────────────────────────────────────────────
 section("3. add_item")
 # ─────────────────────────────────────────────
@@ -107,9 +121,23 @@ try:
 except Exception as e:
     check("add_item no exception", False, str(e))
 
-section("3b. add_item — duplicate rejected by app logic (item_exists check)")
+section("3b. add_item — brand/category/manufact fields round-trip")
+res = db.get_filtered_items(Item(item_id=TEST_ITEM_ID))
+check("add_item brand correct", res[0].brand == "TestBrand")
+check("add_item category correct", res[0].category == "TestCat")
+check("add_item manufact correct", res[0].manufact == "TestMfg")
+
+section("3c. add_item — duplicate rejected by app logic (item_exists check)")
 res = db.get_filtered_items(Item(item_id=TEST_ITEM_ID))
 check("Duplicate item_id already exists (app would reject)", len(res) == 1)
+
+section("3d. get_filtered_items — filter by brand exact")
+res = db.get_filtered_items(Item(brand="TestBrand"))
+check("filter by brand returns test item", any(i.item_id == TEST_ITEM_ID for i in res))
+
+section("3e. get_filtered_items — no match returns empty list")
+res = db.get_filtered_items(Item(item_id="ZZZNOMATCH00000Z"))
+check("no match returns empty list", res == [])
 
 # ─────────────────────────────────────────────
 section("4. add_customer")
@@ -203,14 +231,33 @@ check("Waitlist place_in_line is int", isinstance(res[0].place_in_line, int))
 res = db.get_filtered_waitlist(Waitlist(), min_place_in_line=1, max_place_in_line=1)
 check("get_filtered_waitlist place range", len(res) >= 1)
 
-section("9c. update_waitlist")
+section("9c. update_waitlist — multiple positions shift correctly")
+# Add two more customers to test shifting
+new_cust3 = Customer(customer_id="TESTCUST0000003A", name="Third Person",
+                     email="third@test.com", address="789 Pine Rd, Orlando, FL 32801")
+new_cust4 = Customer(customer_id="TESTCUST0000004A", name="Fourth Person",
+                     email="fourth@test.com", address="321 Elm St, Miami, FL 33101")
 try:
+    db.add_customer(new_cust3)
+    db.add_customer(new_cust4)
+    db.save_changes()
+    db.waitlist_customer(TEST_ITEM_ID, "TESTCUST0000003A")
+    db.waitlist_customer(TEST_ITEM_ID, "TESTCUST0000004A")
+    db.save_changes()
+    check("line_length is 3 before update", db.line_length(TEST_ITEM_ID) == 3)
     db.update_waitlist(TEST_ITEM_ID)
     db.save_changes()
-    check("update_waitlist removes position 1", db.line_length(TEST_ITEM_ID) == 0)
-    check("place_in_line -1 after update", db.place_in_line(TEST_ITEM_ID, TEST_CUST_ID2) == -1)
+    check("update_waitlist removes position 1", db.line_length(TEST_ITEM_ID) == 2)
+    check("cust2 removed (was position 1)", db.place_in_line(TEST_ITEM_ID, TEST_CUST_ID2) == -1)
+    check("cust3 shifted to position 1", db.place_in_line(TEST_ITEM_ID, "TESTCUST0000003A") == 1)
+    check("cust4 shifted to position 2", db.place_in_line(TEST_ITEM_ID, "TESTCUST0000004A") == 2)
+    # clear remaining waitlist
+    db.update_waitlist(TEST_ITEM_ID)
+    db.update_waitlist(TEST_ITEM_ID)
+    db.save_changes()
+    check("waitlist empty after clearing", db.line_length(TEST_ITEM_ID) == 0)
 except Exception as e:
-    check("update_waitlist no exception", False, str(e))
+    check("update_waitlist shift no exception", False, str(e))
 
 # ─────────────────────────────────────────────
 section("10. return_item")
@@ -238,8 +285,7 @@ check("get_filtered_rental_histories return_date range", len(res) >= 1)
 check("RentalHistory return_date is str", all(isinstance(r.return_date, str) for r in res[:5]))
 
 # ─────────────────────────────────────────────
-section("12. edit_customer")
-# ─────────────────────────────────────────────
+section("12. edit_customer — name and email")
 try:
     db.edit_customer(TEST_CUST_ID, Customer(email="updated@test.com", name="Updated Name"))
     db.save_changes()
@@ -249,15 +295,64 @@ try:
 except Exception as e:
     check("edit_customer no exception", False, str(e))
 
+section("12b. edit_customer — address update")
+try:
+    db.edit_customer(TEST_CUST_ID, Customer(address="999 New Ave, Jacksonville, FL 32099"))
+    db.save_changes()
+    res = db.get_filtered_customers(Customer(customer_id=TEST_CUST_ID))
+    check("edit_customer updates address city", "Jacksonville" in res[0].address)
+    check("edit_customer updates address street", "999" in res[0].address)
+except Exception as e:
+    check("edit_customer address no exception", False, str(e))
+
+section("12c. edit_customer — only None fields unchanged")
+try:
+    before = db.get_filtered_customers(Customer(customer_id=TEST_CUST_ID))[0]
+    db.edit_customer(TEST_CUST_ID, Customer(email="only_email@test.com"))
+    db.save_changes()
+    after = db.get_filtered_customers(Customer(customer_id=TEST_CUST_ID))[0]
+    check("edit_customer unchanged name when not provided", after.name == before.name)
+    check("edit_customer changed email", after.email == "only_email@test.com")
+except Exception as e:
+    check("edit_customer partial update no exception", False, str(e))
+
+section("12d. edit_customer — change customer_id")
+try:
+    db.edit_customer(TEST_CUST_ID, Customer(customer_id="TESTCUST0000001B"))
+    db.save_changes()
+    res_new = db.get_filtered_customers(Customer(customer_id="TESTCUST0000001B"))
+    res_old = db.get_filtered_customers(Customer(customer_id=TEST_CUST_ID))
+    check("edit_customer new customer_id found", len(res_new) == 1)
+    check("edit_customer old customer_id gone", len(res_old) == 0)
+    # rename back for cleanup
+    db.edit_customer("TESTCUST0000001B", Customer(customer_id=TEST_CUST_ID))
+    db.save_changes()
+except Exception as e:
+    check("edit_customer change id no exception", False, str(e))
+
 # ─────────────────────────────────────────────
-section("13. Cleanup test data")
+section("13. get_filtered_rentals — no match returns empty list")
+res = db.get_filtered_rentals(Rental(item_id="ZZZNOMATCH00000Z"))
+check("get_filtered_rentals no match returns empty", res == [])
+
+section("13b. get_filtered_rental_histories — due_date range filter")
+res_all = db.get_filtered_rental_histories(RentalHistory())
+if res_all:
+    sample_due = res_all[0].due_date
+    res = db.get_filtered_rental_histories(RentalHistory(), min_due_date=sample_due, max_due_date=sample_due)
+    check("rental_history due_date range filter works", len(res) >= 1)
+    check("all due_dates match range", all(r.due_date == sample_due for r in res))
+
+section("13c. get_filtered_waitlist — no match returns empty list")
+res = db.get_filtered_waitlist(Waitlist(item_id="ZZZNOMATCH00000Z"))
+check("get_filtered_waitlist no match returns empty", res == [])
+
+section("14. Cleanup test data")
 # ─────────────────────────────────────────────
 try:
     import mariadb
     from MARIADB_CREDS import DB_CONFIG
-    conn2 = mariadb.connect(**{k: v for k, v in DB_CONFIG.items()
-                               if k in ("user","password","host","port","database")},
-                            user=DB_CONFIG["username"], password=DB_CONFIG["password"],
+    conn2 = mariadb.connect(user=DB_CONFIG["username"], password=DB_CONFIG["password"],
                             host=DB_CONFIG["host"], port=DB_CONFIG["port"],
                             database=DB_CONFIG["database"])
     cur2 = conn2.cursor()
@@ -265,7 +360,8 @@ try:
     cur2.execute("DELETE FROM rental WHERE item_id = ?", (TEST_ITEM_ID,))
     cur2.execute("DELETE FROM waitlist WHERE item_id = ?", (TEST_ITEM_ID,))
     cur2.execute("DELETE FROM item WHERE TRIM(i_item_id) = ?", (TEST_ITEM_ID,))
-    cur2.execute("DELETE FROM customer WHERE TRIM(c_customer_id) IN (?, ?)", (TEST_CUST_ID, TEST_CUST_ID2))
+    for cid in (TEST_CUST_ID, TEST_CUST_ID2, "TESTCUST0000003A", "TESTCUST0000004A"):
+        cur2.execute("DELETE FROM customer WHERE TRIM(c_customer_id) = ?", (cid,))
     conn2.commit()
     conn2.close()
     check("Cleanup succeeded", True)
@@ -273,7 +369,7 @@ except Exception as e:
     check("Cleanup", False, str(e))
 
 # ─────────────────────────────────────────────
-section("SUMMARY")
+section("15. SUMMARY")
 # ─────────────────────────────────────────────
 passed = sum(1 for _, ok in results if ok)
 failed = sum(1 for _, ok in results if not ok)
